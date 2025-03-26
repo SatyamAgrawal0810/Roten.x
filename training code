@@ -1,0 +1,152 @@
+import pandas as pd
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.optimizers import RMSprop
+from tensorflow.keras.optimizers.schedules import ExponentialDecay
+from scipy.signal import butter, filtfilt
+from scipy.interpolate import interp1d
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+import matplotlib.pyplot as plt
+
+# Load the dataset
+csv_filename = "train.csv"
+df = pd.read_csv(csv_filename)
+
+# Apply noise reduction (smoothing) using Exponential Moving Average (EMA)
+def ema_smoothing(data, alpha=0.3):
+    return data.ewm(alpha=alpha).mean()
+
+df[['EMG1', 'EMG2', 'EMG3']] = df[['EMG1', 'EMG2', 'EMG3']].apply(ema_smoothing)
+
+# Apply a low-pass Butterworth filter to remove high-frequency noise
+def butter_lowpass_filter(data, cutoff=0.1, fs=1.0, order=3):
+    nyquist = 0.5 * fs
+    normal_cutoff = cutoff / nyquist
+    b, a = butter(order, normal_cutoff, btype='low', analog=False)
+    return filtfilt(b, a, data)
+
+df[['EMG1', 'EMG2', 'EMG3']] = df[['EMG1', 'EMG2', 'EMG3']].apply(lambda x: butter_lowpass_filter(x))
+
+# **Moving Average Smoothing**
+def moving_average(data, window_size=10):
+    return np.convolve(data, np.ones(window_size) / window_size, mode='same')
+
+df['EMG1'] = moving_average(df['EMG1'].values)
+df['EMG2'] = moving_average(df['EMG2'].values)
+df['EMG3'] = moving_average(df['EMG3'].values)
+
+# Data Augmentation Functions
+
+# Jittering: Adds small random noise to EMG signals
+def add_jitter(data, noise_level=0.01):
+    noise = np.random.normal(loc=0, scale=noise_level, size=data.shape)
+    return data + noise
+
+# Scaling: Randomly scales the amplitude of EMG signals
+def scale_signal(data, scale_range=(0.9, 1.1)):
+    scale_factor = np.random.uniform(scale_range[0], scale_range[1])
+    return data * scale_factor
+
+# Time-Warping: Stretches or compresses the EMG signal over time
+def time_warp(data, warp_factor_range=(0.8, 1.2)):
+    warp_factor = np.random.uniform(*warp_factor_range)
+
+    original_length = np.arange(len(data))
+    new_length = np.linspace(0, len(data) - 1, int(len(data) * warp_factor))
+
+    interpolator = interp1d(original_length, data, axis=0, kind='linear', fill_value="extrapolate")
+    warped_data = interpolator(new_length)
+
+    # Ensure warped data has the same length as original
+    final_length = np.linspace(0, len(data) - 1, len(data))
+    final_interpolator = interp1d(np.linspace(0, len(warped_data) - 1, len(warped_data)), warped_data, axis=0, kind='linear', fill_value="extrapolate")
+
+    return final_interpolator(final_length)
+
+# Apply augmentations
+df['EMG1'] = time_warp(df['EMG1'].values)
+df['EMG2'] = time_warp(df['EMG2'].values)
+df['EMG3'] = time_warp(df['EMG3'].values)
+
+df[['EMG1', 'EMG2', 'EMG3']] = df[['EMG1', 'EMG2', 'EMG3']].apply(add_jitter)
+df[['EMG1', 'EMG2', 'EMG3']] = df[['EMG1', 'EMG2', 'EMG3']].apply(scale_signal)
+
+# Extract features (EMG signals) and labels (Finger names)
+X = df[['EMG1', 'EMG2', 'EMG3']].values
+y = df['Finger'].values
+
+# Normalize EMG signals using Z-score normalization
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# Encode labels (Convert finger names to numerical values)
+encoder = LabelEncoder()
+y_encoded = encoder.fit_transform(y)
+
+# Reshape input for LSTM (samples, time steps, features)
+X_reshaped = X_scaled.reshape(X_scaled.shape[0], 1, X_scaled.shape[1])
+
+# Split data into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(X_reshaped, y_encoded, test_size=0.2, random_state=42)
+
+# Learning rate decay for stable training
+lr_schedule = ExponentialDecay(
+    initial_learning_rate=0.001, decay_steps=1000, decay_rate=0.95
+)
+
+# Optimized RMSprop with smoothing techniques
+optimizer = RMSprop(
+    learning_rate=lr_schedule, rho=0.9, epsilon=1e-7, clipvalue=1.0
+)
+
+# Define the LSTM model
+model = Sequential([
+    LSTM(50, activation='relu', return_sequences=True, input_shape=(1, 3)),
+    Dropout(0.2),
+    LSTM(50, activation='relu'),
+    Dropout(0.2),
+    Dense(25, activation='relu'),
+    Dense(len(set(y_encoded)), activation='softmax')  # Output layer with softmax for classification
+])
+
+# Compile the model
+model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+
+# Train the model
+print("Training LSTM Model...")
+history = model.fit(X_train, y_train, epochs=10, batch_size=32, validation_data=(X_test, y_test))
+
+# Plot training history
+plt.plot(history.history['accuracy'], label='Train Accuracy')
+plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+plt.xlabel('Epochs')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.title("Model Accuracy Over Epochs")
+plt.show()
+
+# Evaluate model
+test_loss, test_acc = model.evaluate(X_test, y_test)
+print(f"Test Accuracy: {test_acc:.2f}")
+
+# Save the trained model
+model.save("lstm_finger_model.h5")
+print("Model saved as 'lstm_finger_model.h5'.")
+
+# Function to predict finger movement from new EMG data
+def predict_finger(emg1, emg2, emg3):
+    input_data = np.array([[emg1, emg2, emg3]])
+    input_scaled = scaler.transform(input_data)
+    input_reshaped = input_scaled.reshape(1, 1, 3)
+    prediction = model.predict(input_reshaped)
+    predicted_label = np.argmax(prediction)
+    predicted_finger = encoder.inverse_transform([predicted_label])[0]
+    return predicted_finger
+
+# Example Prediction
+sample_emg = [10, 20, 5]  # Example new EMG data
+predicted_finger = predict_finger(*sample_emg)
+print(f"Predicted Finger for EMG {sample_emg}: {predicted_finger}")
