@@ -24,6 +24,6 @@ Research & Development: Understanding user needs and refining gesture recognitio
 
 Prototype Development: Building an initial working model for testing.
 
-Testing & User Feedback: Collaborating with individuals who have speech impairments and prosthetic users to refine functionality.
+Testing & User Feedback: Collaborating with individuals who have speech impairments.
 
 Production & Deployment: Scaling the final version for commercial availability.
